@@ -1,3 +1,5 @@
+.DS_Store
+
 *.ts
 !index.ts
 !character.ts
@@ -5,3 +7,8 @@
 node_modules
 
 db.sqlite
+
+# sst
+.sst
+
+characters
