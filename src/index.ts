@@ -1,8 +1,6 @@
 import { PostgresDatabaseAdapter } from "@ai16z/adapter-postgres";
-import { SqliteDatabaseAdapter } from "@ai16z/adapter-sqlite";
-import { DirectClientInterface } from "@ai16z/client-direct";
 import { DiscordClientInterface } from "@ai16z/client-discord";
-import { SupabaseDatabaseAdapter } from "@ai16z/adapter-supabase"
+import { SupabaseDatabaseAdapter } from "./supabase-adapter.ts"
 import { AutoClientInterface } from "@ai16z/client-auto";
 import { TelegramClientInterface } from "@ai16z/client-telegram";
 import { TwitterClientInterface } from "@ai16z/client-twitter";
@@ -78,7 +76,7 @@ export async function loadCharacters(
 ): Promise<Character[]> {
   let characterPaths = charactersArg?.split(",").map((filePath) => {
     if (path.basename(filePath) === filePath) {
-      filePath = "../characters/" + filePath;
+      filePath = "characters/" + filePath;
     }
     return path.resolve(process.cwd(), filePath.trim());
   });
@@ -167,6 +165,8 @@ function initializeDatabase(dataDir: string) {
       process.env.SUPABASE_ANON_KEY!,
     );
     return db;
+  } else {
+    process.exit(1)
   }
 }
 
@@ -259,20 +259,18 @@ async function startAgent(character: Character, directClient?: DirectClient) {
 
     const db = initializeDatabase(dataDir);
 
-    // await db.init();
-
+    await db.init();
     const cache = initializeDbCache(character, db);
     const runtime = createAgent(character, db, cache, token);
 
     await runtime.initialize();
-
     const clients = await initializeClients(character, runtime);
 
     if (directClient) {
       directClient.registerAgent(runtime);
     }
 
-    return clients;
+    return { runtime, clients }; // Modified to return both runtime and clients
   } catch (error) {
     elizaLogger.error(
       `Error starting agent for character ${character.name}:`,
@@ -283,68 +281,148 @@ async function startAgent(character: Character, directClient?: DirectClient) {
   }
 }
 
-const startAgents = async () => {
-  // const directClient = await DirectClientInterface.start();
-  const args = parseArguments();
-
-  let charactersArg = args.characters || args.character;
-
-  let characters = [character];
-  console.log("charactersArg", charactersArg);
-  if (charactersArg) {
-    characters = await loadCharacters(charactersArg);
+class AgentRegistry {
+  constructor() {
+    this.agents = new Map();
   }
-  console.log("characters", characters);
-  try {
+
+  async loadAgents() {
+    const characters = await loadCharacters('alissa.character.json');
     for (const character of characters) {
-      await startAgent(character);
+      await this.registerAgent(character);
     }
-  } catch (error) {
-    console.log(error)
-    elizaLogger.error("Error starting agents:", error);
   }
-};
 
-startAgents().catch((error) => {
-  elizaLogger.error("Unhandled error in startAgents:", error);
-  process.exit(1); // Exit the process after logging
+  async registerAgent(character) {
+    if (this.agents.has(character.id)) {
+      throw new Error(`Agent ${character.name} is already registered.`);
+    }
+    console.log("Register agent "+character.name)
+    const agentData = await startAgent(character); // Call startAgent and store the return
+    console.log(character.clients)
+    // console.log(agentData)
+    this.agents.set(character.id, { character, ...agentData, status: 'started' }); // Store agentData in the manager
+  }
+
+  async startAgent(characterId) {
+    const agentData = this.agents.get(characterId);
+    if (!agentData) {
+      throw new Error(`Agent with ID ${characterId} is not registered.`);
+    }
+    if (agentData.status === 'running') {
+      console.log(`Agent ${agentData.character.name} is already running.`);
+      return;
+    }
+    agentData.status = 'running';
+    console.log(`Agent ${agentData.character.name} started.`);
+  }
+
+  async stopAgent(characterId) {
+    const agentData = this.agents.get(characterId);
+    if (!agentData) {
+      throw new Error(`Agent with ID ${characterId} is not registered.`);
+    }
+    if (agentData.status === 'stopped') {
+      console.log(`Agent ${agentData.character.name} is already stopped.`);
+      return;
+    }
+    agentData.status = 'stopped';
+    console.log(`Agent ${agentData.character.name} stopped.`);
+  }
+
+  getStatusPage() {
+    const statusPage = Array.from(this.agents.entries()).map(([key, agentData]) => ({
+      id: agentData.id,
+      key,
+      name: agentData.character.name,
+      status: agentData.status
+    }));
+    return statusPage;
+  }
+}
+
+import { Hono } from 'hono';
+
+const app = new Hono();
+
+const agentRegistry = new AgentRegistry();
+(async () => {
+  await agentRegistry.loadAgents();
+})()
+
+app.post('/agents', async (c) => {
+  try {
+    const character = await c.req.parseBody();
+    await agentRegistry.registerAgent(character);
+    await agentRegistry.startAgent(character.id);
+    return c.json({ message: `Agent ${character.name} registered and started.` });
+  } catch (error) {
+    console.error(error);
+    return c.json({ error: error.message }, 500);
+  }
 });
 
-// const rl = readline.createInterface({
-//   input: process.stdin,
-//   output: process.stdout,
-// });
+app.get('/agents/:id/start', async (c) => {
+  const characterId = c.req.param('id');
+  try {
+    await agentRegistry.startAgent(characterId);
+    return c.json({ message: `Agent with ID ${characterId} started.` });
+  } catch (error) {
+    console.error(error);
+    return c.json({ error: error.message }, 404);
+  }
+});
 
-// rl.on("SIGINT", () => {
-//   rl.close();
-//   process.exit(0);
-// });
+app.get('/agents/:id/stop', async (c) => {
+  const characterId = c.req.param('id');
+  try {
+    await agentRegistry.stopAgent(characterId);
+    return c.json({ message: `Agent with ID ${characterId} stopped.` });
+  } catch (error) {
+    console.error(error);
+    return c.json({ error: error.message }, 404);
+  }
+});
 
-// async function handleUserInput(input, agentId) {
-//   if (input.toLowerCase() === "exit") {
-//     process.exit(0);
-//     return;
-//   }
+app.get('/agents/status', async (c) => {
+  try {
+    const statusPage = agentRegistry.getStatusPage();
+    return c.json({ agents: statusPage });
+  } catch (error) {
+    console.error(error);
+    return c.json({ error: error.message }, 500);
+  }
+});
 
-//   try {
-//     const serverPort = parseInt(settings.SERVER_PORT || "3000");
+app.post('/agents/start-all', async (c) => {
+  try {
+    await agentRegistry.startAllAgents();
+    return c.json({ message: 'All agents started.' });
+  } catch (error) {
+    console.error(error);
+    return c.json({ error: error.message }, 500);
+  }
+});
 
-//     const response = await fetch(
-//       `http://localhost:${serverPort}/${agentId}/message`,
-//       {
-//         method: "POST",
-//         headers: { "Content-Type": "application/json" },
-//         body: JSON.stringify({
-//           text: input,
-//           userId: "user",
-//           userName: "User",
-//         }),
-//       }
-//     );
+app.post('/agents/stop-all', async (c) => {
+  try {
+    await agentRegistry.stopAllAgents();
+    return c.json({ message: 'All agents stopped.' });
+  } catch (error) {
+    console.error(error);
+    return c.json({ error: error.message }, 500);
+  }
+});
 
-//     const data = await response.json();
-//     data.forEach((message) => console.log(`${"Agent"}: ${message.text}`));
-//   } catch (error) {
-//     console.error("Error fetching response:", error);
-//   }
-// }
+app.delete('/agents/:id', async (c) => {
+  const characterId = c.req.param('id');
+  try {
+    agentRegistry.deleteAgent(characterId);
+    return c.json({ message: `Agent with ID ${characterId} deleted.` });
+  } catch (error) {
+    console.error(error);
+    return c.json({ error: error.message }, 404);
+  }
+});
+
+export default app;

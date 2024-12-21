@@ -1,6 +1,5 @@
 .DS_Store
 
-*.ts
 !index.ts
 !character.ts
 .env
@@ -12,3 +11,5 @@ db.sqlite
 .sst
 
 characters
+
+dist
